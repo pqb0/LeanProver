@@ -19,7 +19,14 @@ def lean_check(file_path: Path):
         capture_output=True,
         text=True
     )
-    success = "proof completed" in result.stderr.lower() or result.returncode == 0
+    # A proof is only complete if Lean exits successfully AND there are no
+    # remaining `sorry` placeholders (which exit 0 but leave goals unproven).
+    # Lean emits "declaration uses sorry" for any theorem that relies on sorry.
+    has_sorry_warning = (
+        "declaration uses sorry" in result.stderr.lower()
+        or "declaration uses sorry" in result.stdout.lower()
+    )
+    success = result.returncode == 0 and not has_sorry_warning
     return success, result.stdout, result.stderr
 
 def build_prompt(state_code: str):
@@ -47,15 +54,23 @@ def prove_lean_code(lean_code: str, max_steps: int = 20):
         tactic = query_llm(build_prompt(current_code)).strip()
         print(f"[Step {step+1}] LM Studio tactic suggestion:", tactic)
         
-        # Append the tactic to the last theorem in the file
-        # We assume the last theorem ends with 'by'
-        # Correctly append tactic inside a `by` block
+        # Append the tactic after the last existing tactic in the `by` block.
+        # We locate the last `sorry` line (the placeholder) and insert the new
+        # tactic on a new line directly before it so tactics run in order.
         lines = current_code.splitlines()
+        inserted = False
         for i in reversed(range(len(lines))):
-            if lines[i].strip().endswith("by"):
-                # Only add tactic if it's not already there
-                lines[i] += "\n  " + tactic
+            if "sorry" in lines[i]:
+                indent = "  "
+                lines.insert(i, indent + tactic)
+                inserted = True
                 break
+        if not inserted:
+            # No sorry placeholder found – append after the last `by` line.
+            for i in reversed(range(len(lines))):
+                if lines[i].strip().endswith("by"):
+                    lines.insert(i + 1, "  " + tactic)
+                    break
         new_code = "\n".join(lines)
         
         file_path.write_text(new_code)
@@ -74,8 +89,8 @@ def prove_lean_code(lean_code: str, max_steps: int = 20):
 # ----------------------------
 # Example: Fundamental Theorem of Calculus
 # ----------------------------
-ftc_code = """theorem add_zero (n : Nat) : n + 0 = n := by
-                sorry"""
+if __name__ == "__main__":
+    ftc_code = "theorem add_zero (n : Nat) : n + 0 = n := by\n  sorry"
 
-# Run the prover
-prove_lean_code(ftc_code)
+    # Run the prover
+    prove_lean_code(ftc_code)
